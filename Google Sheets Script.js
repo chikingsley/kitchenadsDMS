@@ -1,13 +1,13 @@
-function onOpen() {
-  var ui = SpreadsheetApp.getUi();
-  var menu = ui.createMenu('Custom Menu');
-  menu.addItem('Set Up Trigger', 'setupTrigger');
-  menu.addItem('Update Partner Types', 'updatePartnerTypes');
-  menu.addToUi();
-}
+// Sheet indices:
+// 0: Deal Processing Sheet
+// 1: Supplier Deals Sheet
+// 2: Client Deals Sheet
+// 3: Partner List
+// 4: Funnel List
 
-function setupTrigger() {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
+function initialSetupTrigger() {
+  console.log("initialSetupTrigger started");
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];  // Deal Processing Sheet
   var cell = sheet.getRange("J1");
   
   // Create dropdown list
@@ -17,198 +17,181 @@ function setupTrigger() {
   // Set default value and color
   cell.setValue("Ready");
   cell.setBackground("green");
+  console.log("initialSetupTrigger completed");
 }
 
 function processAndTransfer() {
+  console.log("processAndTransfer started");
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet1 = ss.getSheets()[0];
-  var sheet2 = ss.getSheets()[1];
-  var funnelSheet = ss.getSheets()[4]; // 5th sheet for funnel list
-  
+  var sheet1 = ss.getSheets()[0];  // Deal Processing Sheet
+  var sheet2 = ss.getSheets()[1];  // Supplier Deals Sheet
+  var funnelSheet = ss.getSheets()[4];  // Funnel List Sheet
+
+  if (!sheet1 || !sheet2 || !funnelSheet) {
+    console.error("One or more sheets not found");
+    return;
+  }
+
   var lastRow = sheet1.getLastRow();
-  var data = sheet1.getRange(2, 1, lastRow - 1, 9).getValues();
-  
+  var data = sheet1.getRange(3, 1, lastRow - 2, 9).getValues();
+  console.log(`Processing ${data.length} rows`);
+
   var today = new Date();
   var dateString = Utilities.formatDate(today, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  var newRows = [];
+  var funnelsToAdd = new Set();
   
   for (var i = 0; i < data.length; i++) {
-    if (data[i][0]) {
+    if (data[i][0] && data[i][1] && data[i][2]) {  // Ensure essential data is present
+      console.log(`Processing row ${i + 3}`);
       var dealId = generateDealId(data[i], today);
+      var formattedFunnels = data[i][7].replace(/[\[\]]/g, '').split(',').map(f => f.trim()).join(', ');
       var newRow = [
         dateString,  // Date
         dealId,      // Deal ID
         data[i][1],  // Partner
+        "",          // Partner Priority (new column in Supplier Deals Sheet)
         data[i][2],  // Geo
         data[i][3],  // Language
         data[i][4],  // Source
         data[i][5],  // CPA
         data[i][6],  // CRG
+        data[i][8],  // CR
         "",          // CPL (empty for now)
-        data[i][7],  // Funnels
+        formattedFunnels,  // Funnels (formatted)
         "",          // EPL (empty, to be calculated manually)
         "",          // Quality (empty)
         "",          // Affiliate/Brand Interested (empty)
-        formatFullDeal(data[i])  // FULL DEAL
+        ""           // FULL DEAL (removed, now calculated in the sheet)
       ];
-      sheet2.appendRow(newRow);
+      newRows.push(newRow);
       
-      // Process funnels
-      processFunnels(data[i][7], funnelSheet);
-      
-      // Clear the processed row from sheet1
-      sheet1.getRange(i + 2, 1, 1, 9).clearContent();
-      
-      // Force the spreadsheet to update its display
-      SpreadsheetApp.flush();
+      // Add to funnels to be processed later
+      formattedFunnels.split(', ').forEach(funnel => {
+        if (funnel !== "") funnelsToAdd.add(funnel);
+      });
     }
   }
-  
+
+  // Batch append rows to Supplier Deals Sheet at the correct position
+  if (newRows.length > 0) {
+    var lastNonEmptyRow = getLastNonEmptyRow(sheet2);  // Find the correct last non-empty row
+    sheet2.getRange(lastNonEmptyRow + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+    console.log("Rows appended to Supplier Deals Sheet in bulk");
+  }
+
+  // Process funnels in bulk
+  processFunnels(Array.from(funnelsToAdd), funnelSheet);
+
+  // Clear processed rows from sheet1 in bulk
+  sheet1.getRange(3, 1, lastRow - 2, 9).clearContent();
+  console.log("Cleared processed rows from Deal Processing Sheet in bulk");
+
   // Reset J1 to "Ready" and green
   var triggerCell = sheet1.getRange("J1");
   triggerCell.setValue("Ready");
   triggerCell.setBackground("green");
-  
-  // Update partner types
-  updatePartnerTypes();
+  console.log("processAndTransfer completed");
 }
 
-function processFunnels(funnelsString, funnelSheet) {
-  // Remove brackets and split by comma
-  var funnels = funnelsString.replace(/[\[\]]/g, '').split(',').map(funnel => funnel.trim());
-  var existingFunnels = funnelSheet.getRange("A1:A" + funnelSheet.getLastRow()).getValues().flat();
+// Helper function to find the last non-empty row in the Supplier Deals Sheet
+function getLastNonEmptyRow(sheet) {
+  var lastRow = sheet.getLastRow();
+  var data = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
   
-  funnels.forEach(funnel => {
-    if (!existingFunnels.includes(funnel) && funnel !== "") {
-      funnelSheet.appendRow([funnel]);
+  // Traverse rows from bottom to top to find the actual last row with data
+  for (var i = data.length - 1; i >= 0; i--) {
+    if (data[i].some(cell => cell !== "")) {
+      return i + 1;  // Return the row number (i is 0-based)
     }
-  });
+  }
+  return 0;  // No data found, return row 0 (first available row)
+}
+
+function processFunnels(funnels, funnelSheet) {
+  console.log("processFunnels started");
+  if (!funnelSheet) {
+    console.error("Funnel sheet not found");
+    return;
+  }
+
+  var lastRow = funnelSheet.getLastRow();
+  var existingFunnels = lastRow > 0 ? funnelSheet.getRange("A1:A" + lastRow).getValues().flat() : [];
+  var funnelsToAdd = funnels.filter(funnel => !existingFunnels.includes(funnel));
+
+  if (funnelsToAdd.length > 0) {
+    var newFunnelRows = funnelsToAdd.map(funnel => [funnel]);
+    funnelSheet.getRange(funnelSheet.getLastRow() + 1, 1, newFunnelRows.length, 1).setValues(newFunnelRows);
+    console.log(`${funnelsToAdd.length} new funnels added in bulk`);
+  }
+  console.log("processFunnels completed");
 }
 
 function generateDealId(rowData, date) {
-  var geo = rowData[2].toUpperCase();
+  var geo = rowData[2].toUpperCase().replace(/\s+/g, '');  // Remove spaces from geo code as well
   var partner = rowData[1].replace(/\s+/g, '');  // Remove spaces from partner name
   var formattedDate = Utilities.formatDate(date, Session.getScriptTimeZone(), "ddMMyyyy");
   return `${geo}-${partner}-${formattedDate}`;
 }
 
-function formatFullDeal(rowData) {
-  var source = rowData[4];
-  var geo = rowData[2];
-  var cpa = rowData[5];
-  var crg = rowData[6];
-  var funnels = rowData[7];
-  var language = rowData[3];
-  var cr = parseInt(crg*100) + 2;
-  
-  return `[${source}] ${geo} ${cpa}+${crg*100}% (Expected CR ${cr}%)\nFunnel(s): ${funnels} || Language: ${language}`;
-}
-
-function updatePartnerTypes() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var dealSheet = ss.getSheets()[1];  // 2nd sheet (deal tracker)
-  var partnerSheet = ss.getSheets()[3];  // 4th sheet (partner list)
-  
-  // Get partner data
-  var partnerData = partnerSheet.getRange("A2:B" + partnerSheet.getLastRow()).getValues();
-  var partnerTypes = {};
-  partnerData.forEach(row => {
-    partnerTypes[row[0]] = row[1];  // Assuming column A is Partner Name and B is Type
-  });
-  
-  // Update deal sheet
-  var lastRow = dealSheet.getLastRow();
-  var partnerColumn = 3;  // Column C
-  var typeColumn = 13;    // Column M (Affiliate/Brand Interested)
-  
-  for (var i = 2; i <= lastRow; i++) {
-    var partner = dealSheet.getRange(i, partnerColumn).getValue();
-    var typeCell = dealSheet.getRange(i, typeColumn);
-    
-    if (partner in partnerTypes) {
-      var type = partnerTypes[partner];
-      typeCell.setValue(type);
-      
-      // Set color based on type
-      if (type.toLowerCase() === "brand") {
-        typeCell.setBackground("#b7e1cd");  // Light green
-      } else if (type.toLowerCase() === "network") {
-        typeCell.setBackground("#fce8b2");  // Light yellow
-      } else {
-        typeCell.setBackground(null);  // Clear background
-      }
-    } else {
-      typeCell.setValue("");
-      typeCell.setBackground(null);  // Clear background
-    }
-  }
-  
-  // Set data validation for the type column
-  var types = Object.values(partnerTypes).filter((v, i, a) => a.indexOf(v) === i);  // Get unique types
-  var rule = SpreadsheetApp.newDataValidation().requireValueInList(types, true).build();
-  dealSheet.getRange(2, typeColumn, lastRow - 1, 1).setDataValidation(rule);
-}
-
 function onEdit(e) {
+  console.log("onEdit triggered");
   var range = e.range;
   var sheet = range.getSheet();
   var value = range.getValue();
-  
-  if (sheet.getIndex() === 1) {
+
+  console.log(`Sheet index: ${sheet.getIndex()}, Range: ${range.getA1Notation()}, Value: ${value}`);
+
+  if (sheet.getIndex() === 1) {  // Deal Processing Sheet
     if (range.getA1Notation() === "J1") {
       if (value === "Processing") {
         range.setBackground("yellow");
-        processAndTransfer();
+        try {
+          processAndTransfer();
+        } catch (error) {
+          console.error(`Error in processAndTransfer: ${error}`);
+          range.setValue("Ready");
+          range.setBackground("red");
+        }
       } else if (value === "Ready") {
         range.setBackground("green");
       }
-    } else if (range.getColumn() === 1 && range.getRow() > 1) {
+    } else if (range.getColumn() === 1 && range.getRow() >= 3) {
       processInSheet1();
     }
   }
+  console.log("onEdit completed");
 }
 
 function processInSheet1() {
+  console.log("processInSheet1 started");
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet1 = ss.getSheets()[0];
+  var sheet1 = ss.getSheets()[0];  // Deal Processing Sheet
   
   var lastRow = sheet1.getLastRow();
-  var data = sheet1.getRange(2, 1, lastRow - 1, 1).getValues();
+  var data = sheet1.getRange(3, 1, lastRow - 2, 1).getValues();
   
   for (var i = 0; i < data.length; i++) {
     var dealData = data[i][0];
     if (dealData) {
+      console.log(`Processing row ${i + 3}`);
       var parts = dealData.split("-");
       
       if (parts.length >= 6) {
-        var partner = parts[0].trim();
-        var geoCode = parts[1].trim();
-        var language = parts[2].trim();
-        var source = parts[3].trim();
-        var cpa = parts[4].trim();
-        var crg = parts[5].trim();
-        var funnels = parts.slice(6, -1).join("-").trim();
-        var cr = parts[parts.length - 1].trim();
-        
-        if (language.toLowerCase() === "fb" || language.toLowerCase() === "google") {
-          source = language;
-          language = "Native";
-        }
-        
-        if (source.toLowerCase() === "fb") {
-          source = "Facebook";
-        }
-        
-        sheet1.getRange(i + 2, 2).setValue(partner);
-        sheet1.getRange(i + 2, 3).setValue(geoCode);
-        sheet1.getRange(i + 2, 4).setValue(language);
-        sheet1.getRange(i + 2, 5).setValue(source);
-        sheet1.getRange(i + 2, 6).setValue(cpa);
-        sheet1.getRange(i + 2, 7).setValue(crg/100);
-        sheet1.getRange(i + 2, 8).setValue(funnels);
-        sheet1.getRange(i + 2, 9).setValue(cr + "%"); // CR column
+        sheet1.getRange(i + 3, 2).setValue(parts[0].trim());  // Partner
+        sheet1.getRange(i + 3, 3).setValue(parts[1].trim());  // Geo Code
+        sheet1.getRange(i + 3, 4).setValue(parts[2].trim());  // Language
+        sheet1.getRange(i + 3, 5).setValue(parts[3].trim());  // Source
+        sheet1.getRange(i + 3, 6).setValue(parts[4].trim());  // CPA
+        sheet1.getRange(i + 3, 7).setValue(Number(parts[5].trim()) / 100);  // CRG
+        sheet1.getRange(i + 3, 8).setValue(parts.slice(6, -1).join("-").trim());  // Funnels
+        sheet1.getRange(i + 3, 9).setValue(parts[parts.length - 1].trim());  // CR
+        console.log(`Row ${i + 3} processed successfully`);
       } else {
-        sheet1.getRange(i + 2, 2).setValue("Invalid Format");
+        sheet1.getRange(i + 3, 2).setValue("Invalid Format");
+        console.warn(`Invalid format in row ${i + 3}`);
       }
     }
   }
+  console.log("processInSheet1 completed");
 }
